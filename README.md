@@ -1,77 +1,83 @@
 # Price Tracker
 
-A small Rails app that checks the price of products on supermarket websites twice a day, keeps the price history in SQLite, and sends an email when a price changes or a check fails.
+A small Ruby on Rails application that monitors product prices on supermarket websites twice a day, stores price history in SQLite, and sends email notifications when prices change or a check fails.
 
-It started as a hands-on project to get back into Ruby on Rails: small services with a single responsibility, a spec for every piece, and a systemd timer instead of a hosted scheduler. There is no web UI and no external service besides SMTP.
+It started as a hands-on project to get back into Ruby on Rails: small services with a single responsibility, specs for the main components, and a systemd timer instead of a hosted scheduler. There is no web UI, and SMTP is used for email delivery.
 
 ## Features
 
-- Tracks any number of products, listed in a YAML file
-- One class per market (site), each with its own host, cookie and price extraction
-- Prices stored as integer cents, never as floats
-- Price history per product: one record per check, including failures
-- Email when a price changes and when a check fails
-- On demand email report with the current price of every product
-- Failure isolation: one broken product does not stop the others
+- Tracks multiple products defined in a YAML file
+- Supports multiple supermarkets, each with its own price-fetching and extraction strategy
+- Stores prices as integer cents, never as floats
+- Supports regular and club prices
+- Keeps price history per product, with one record per check, including failures
+- Sends email notifications when a price changes or a check fails
+- Generates an on-demand email report with the current price of every product
+- Isolates failures so one broken product does not stop the others
 
 ## How it works
 
-```
+```text
 systemd timer (09:00 and 21:00)
   -> bin/rails price:check
-       -> price:sync          reads config/products.yml and upserts Products
-       -> CheckPriceJob       runs the Runner for each Product
+       -> price:sync          creates or updates products from config/products.yml
+       -> CheckPriceJob       runs the Runner for every Product
             -> Runner
                  1. Markets.for(url)          finds the market by host
-                 2. Fetcher.get(url, cookie)  downloads the page
-                 3. market.price_cents(html)  extracts the price in cents
-                 4. saves a PriceCheck and updates the Product (one transaction)
-                 5. PriceMailer               emails on change or on failure
+                 2. Fetches the product page using the market's strategy
+                 3. Extracts the regular and optional club prices
+                 4. Saves a PriceCheck and updates the Product
+                 5. PriceMailer               sends notifications when needed
 ```
 
 What happens on each check:
 
 | Situation | PriceCheck | Product | Email |
 |---|---|---|---|
-| First check of a product | ok | price saved | none |
+| First successful check | ok | current price saved | none |
 | Same price | ok | unchanged | none |
 | Different price | ok | price and `last_changed_at` updated | price changed |
-| Known failure (network, parsing, unknown market, missing config) | error | unchanged | check failed |
+| Known failure (network, parsing, unknown market, configuration) | error | unchanged | check failed |
 
 Unexpected errors for one product are logged and re-raised at the end of the job, after every other product has been checked. The service then exits with a failure status, which shows up in `systemctl --user --failed`.
 
 ## Data model
 
-- `Product`: `slug` (unique), `name`, `url`, `price_cents`, `last_changed_at`. Holds the current state.
-- `PriceCheck`: `product_id`, `status` (`ok` or `error`), `price_cents`, `error_message`, `checked_at`. Append only history.
+- `Product`: `slug`, `name`, `url`, `price_cents`, `club_price_cents`, `last_changed_at`. Holds the current state of a tracked product.
+- `PriceCheck`: `product_id`, `status` (`ok` or `error`), `price_cents`, `error_message`, `checked_at`. Stores the check history.
+
+Prices are stored as integer cents to avoid floating-point precision issues.
 
 ## Markets
 
-A market is a class in `app/services/price_tracker/markets/` that responds to:
+Each supermarket has its own implementation under `app/services/price_tracker/markets/`.
 
-- `host`: the hostname used to match product URLs
-- `cookie`: the value of the `Cookie` header to send (some sites change the price by store or postal code)
-- `price_cents(html)`: returns the price as integer cents, or raises `PriceTracker::Parser::ParseError`
+The market registry identifies the appropriate implementation by matching the hostname of a product URL.
+
+The `Defaults` module provides common behavior for market implementations, including store names, request headers, HTTP fetching, availability checks, and the default handling of club prices. Individual markets can override this behavior when their websites require a different approach.
 
 Current markets:
 
-- **Simão Doces**: price read from `#variacaoPreco`. A fixed cookie selects the store.
-- **Jaú Serve**: price read from the sales price element (`span.sales span.value[content]`) and converted with `BigDecimal`. The cookie combines a store id and a postal code. The postal code is personal data, so it is read from an environment variable and never stored in the repository.
+- **Central Supermercados**: uses Ferrum to load dynamically rendered product pages.
+- **Furlanetti**: supports regular and club pricing.
+- **Jaú Serve**: uses a store identifier and postal code to select the correct pricing.
+- **Simão Doces**: uses a fixed cookie to select the store.
+- **Tenda Atacado**: retrieves product prices from its website.
 
 To add a new market:
 
-1. Write the spec first, using a small HTML snippet that contains only the price markup
-2. Create the class with `host`, `cookie` and `price_cents`
-3. Register it in `PriceTracker::Markets.all`
-4. Add the products to `config/products.yml`
+1. Write the spec first, using an HTML fixture containing the relevant price markup whenever possible.
+2. Create the market implementation with its own fetching and price-extraction strategy.
+3. Register it in `PriceTracker::Markets.all`.
+4. Add the products to `config/products.yml`.
 
-A product whose host has no registered market is recorded as a failed check and reported by email. It does not affect the other products.
+A product whose hostname has no registered market raises `UnknownMarket`. The failed check is recorded and reported without preventing other products from being checked.
 
 ## Configuration
 
 ### Products
 
-`config/products.yml`:
+`config/products.yml` defines the products being tracked.
 
 ```yaml
 products:
@@ -80,7 +86,27 @@ products:
     url: "https://www.example.com/product-page"
 ```
 
-Only `name` and `url` are synced. Prices and history are never read from the file. A product removed from the file stays in the database, so its history is kept.
+Each product has a unique slug used as its identifier.
+
+The YAML file stores product names and URLs. Prices and check history are stored in the database.
+
+There are two synchronization tasks with different behaviors:
+
+**`price:sync`**
+
+Creates or updates products from the YAML file. Products that are not present in the file are left untouched.
+
+**`products:sync`**
+
+Performs a full reconciliation between the YAML file and the database. It displays the products that would be created, updated, or removed.
+
+By default, this task runs in dry-run mode and makes no changes. To apply the synchronization:
+
+```bash
+CONFIRM=1 bin/rails products:sync
+```
+
+Warning: removing a product also deletes its associated `PriceCheck` records because the `Product` model uses `dependent: :destroy`.
 
 ### Environment variables
 
@@ -93,7 +119,9 @@ Only `name` and `url` are synced. Prices and history are never read from the fil
 | `SMTP_PASSWORD` | for real emails | SMTP password. With Gmail, use an app password |
 | `JAUSERVE_CEP` | for Jaú Serve | Postal code used to select the store price |
 
-Without `SMTP_ADDRESS`, emails open in the browser through `letter_opener` in development. The app currently runs in the development environment on a personal machine.
+Without `SMTP_ADDRESS`, emails open in the browser through `letter_opener` in development.
+
+The application currently runs in the development environment on a personal machine.
 
 ## Getting started
 
@@ -110,18 +138,20 @@ Load the environment variables, then run the tasks:
 ```bash
 set -a; source ~/.config/price-tracker/env; set +a
 
-bin/rails price:sync     # sync products from config/products.yml
-bin/rails price:check    # sync, then check every product
+bin/rails price:sync     # create or update products from config/products.yml
+bin/rails price:check    # synchronize products, then check every product
 bin/rails price:report   # email the current price of every product
 ```
+
+The `price:check` task depends on `price:sync`, so there is no need to run both separately.
 
 ## Scheduling with systemd
 
 The checks run from a systemd user timer. The environment file is read by the service, so credentials survive reboots and stay out of the repository.
 
-`~/.config/price-tracker/env` (create the directory with `chmod 700` and the file with `chmod 600`). Use `KEY=value` lines, without `export` and without quotes:
+`~/.config/price-tracker/env` (create the directory with `chmod 700` and the file with `chmod 600`). Use `KEY=value` lines, without `export`:
 
-```
+```text
 RAILS_ENV=development
 PRICE_ALERT_EMAIL=you@example.com
 SMTP_ADDRESS=smtp.gmail.com
@@ -171,7 +201,7 @@ Enable and inspect:
 systemctl --user daemon-reload
 systemctl --user enable --now price-tracker.timer
 systemctl --user list-timers --no-pager
-systemctl --user start price-tracker.service      # run once, right now
+systemctl --user start price-tracker.service
 journalctl --user -u price-tracker.service -n 50 --no-pager -a
 ```
 
@@ -181,30 +211,13 @@ journalctl --user -u price-tracker.service -n 50 --no-pager -a
 bundle exec rspec
 ```
 
-- Real HTTP requests are blocked by WebMock. The fetcher specs stub every request.
-- Market specs use small inline HTML snippets with only the price markup.
-- Runner specs use a fake market and stub the mailer, so they cover the orchestration only.
-
-## Project layout
-
-```
-app/
-  jobs/check_price_job.rb              runs the Runner for every product
-  mailers/price_mailer.rb              price changed, check failed, price report
-  models/product.rb                    current state of a tracked product
-  models/price_check.rb                one record per check
-  services/price_tracker/
-    fetcher.rb                         HTTP with timeouts, raises FetchError
-    markets.rb                         finds the market by host
-    markets/simao.rb                   market: Simão Doces
-    markets/jauserve.rb                market: Jaú Serve
-    parser.rb                          HTML extraction used by the Simão Doces market
-    product_sync.rb                    syncs config/products.yml into the database
-    runner.rb                          one check of one product
-config/products.yml                    the list of tracked products
-lib/tasks/price.rake                   price:sync, price:check, price:report
-```
+- Real HTTP requests are blocked by WebMock. Fetcher specs stub every request.
+- Market specs use HTML fixtures containing the relevant price markup.
+- Central has its own market spec for its browser-based fetching strategy.
+- Runner specs use a fake market and stub the mailer, covering the orchestration independently.
 
 ## A note on scraping
 
-This is a personal tool. It makes one request per product per run, twice a day. Check the terms of each site before adding it.
+This is a personal tool. It checks each product twice a day. Depending on the supermarket, it uses regular HTTP requests or browser automation to retrieve the product page.
+
+Check the terms of each website before adding it.
