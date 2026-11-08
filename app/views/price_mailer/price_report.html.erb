@@ -1,14 +1,9 @@
 <%
-  products = @products.uniq do |product|
-    store_name = PriceTracker::Markets.for(product[:url]).store_name
-    normalized_name = product[:name].to_s.downcase.strip.gsub(/\s+/, " ")
-
-    [normalized_name, store_name]
-  end
-
-  products.sort_by! do |product|
-    PriceTracker::Markets.for(product[:url]).store_name.downcase
-  end
+  products_by_store = @products
+    .map { |product| product.merge(store_name: PriceTracker::Markets.for(product[:url]).store_name) }
+    .uniq { |product| [product[:name].to_s.squish.downcase, product[:store_name]] }
+    .sort_by { |product| [product[:store_name].downcase, product[:name].to_s.downcase] }
+    .group_by { |product| product[:store_name] }
 %>
 
 <h1 style="margin: 0 0 8px; color: #1f2937; font-size: 24px;">
@@ -19,69 +14,80 @@
   Confira os preços atuais dos produtos monitorados.
 </p>
 
-<table style="width: 100%; border-collapse: collapse; font-size: 14px; color: #374151;">
-  <thead>
-    <tr style="background-color: #f3f4f6; text-align: left;">
-      <th style="padding: 12px; border-bottom: 2px solid #e5e7eb;">
-        Produto
-      </th>
-      <th style="padding: 12px; border-bottom: 2px solid #e5e7eb; white-space: nowrap;">
-        Preço atual
-      </th>
-      <th style="padding: 12px; border-bottom: 2px solid #e5e7eb; text-align: center; white-space: nowrap;">
-        Preço do clube
-      </th>
-      <th style="padding: 12px; border-bottom: 2px solid #e5e7eb;">
-        Loja
-      </th>
-    </tr>
-  </thead>
+<% products_by_store.each do |store_name, store_products| %>
+  <h2 style="margin: 28px 0 8px; padding-bottom: 6px; color: #1f2937; font-size: 18px; border-bottom: 2px solid #e5e7eb;">
+    <%= store_name %>
+  </h2>
 
-  <tbody>
-    <% products.each do |product| %>
-      <tr>
-        <td style="padding: 14px 12px; border-bottom: 1px solid #e5e7eb;">
-          <%= product[:name] %>
-        </td>
+  <table style="width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px; color: #374151;">
+    <colgroup>
+      <col style="width: 46%;">
+      <col style="width: 16%;">
+      <col style="width: 18%;">
+      <col style="width: 20%;">
+    </colgroup>
 
-        <td style="padding: 14px 12px; border-bottom: 1px solid #e5e7eb; white-space: nowrap;">
-          <% if product[:error] %>
-            <span style="color: #b91c1c;">
-              Erro na consulta
-            </span>
-          <% elsif product[:price].to_s.downcase == "indisponível" %>
-            <span style="color: #b45309;">
-              Indisponível
-            </span>
-          <% else %>
-            <strong style="color: #047857;">
-              <%= product[:price] %>
-            </strong>
-          <% end %>
-        </td>
-
-        <td style="padding: 14px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; white-space: nowrap;">
-          <%= product[:club_price].presence || "-" %>
-        </td>
-
-        <td style="padding: 14px 12px; border-bottom: 1px solid #e5e7eb;">
-          <% store_name = PriceTracker::Markets.for(product[:url]).store_name %>
-
-          <%= link_to store_name,
-                      product[:url],
-                      style: "color: #2563eb; text-decoration: none;" %>
-
-          <% if product[:error] %>
-            <div style="margin-top: 4px; color: #b91c1c; font-size: 12px;">
-              <%= product[:error] %>
-            </div>
-          <% end %>
-        </td>
+    <thead>
+      <tr style="background-color: #f3f4f6; text-align: left;">
+        <th width="46%" style="width: 46%; padding: 10px 12px; border-bottom: 1px solid #e5e7eb;">
+          Produto
+        </th>
+        <th width="16%" style="width: 16%; padding: 10px 12px; border-bottom: 1px solid #e5e7eb; white-space: nowrap;">
+          Preço atual
+        </th>
+        <th width="18%" style="width: 18%; padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; white-space: nowrap;">
+          Preço do clube
+        </th>
+        <th width="20%" style="width: 20%; padding: 10px 12px; border-bottom: 1px solid #e5e7eb; white-space: nowrap;">
+          Oferta
+        </th>
       </tr>
-    <% end %>
-  </tbody>
-</table>
+    </thead>
 
-<p style="margin: 20px 0 0; color: #9ca3af; font-size: 12px;">
+    <tbody>
+      <% store_products.each do |product| %>
+        <tr>
+          <td style="padding: 14px 12px; border-bottom: 1px solid #e5e7eb;">
+            <%= product[:name] %>
+          </td>
+
+          <td style="padding: 14px 12px; border-bottom: 1px solid #e5e7eb; white-space: nowrap;">
+            <% if product[:error] %>
+              <span style="color: #b91c1c;">
+                Erro na consulta
+              </span>
+            <% elsif product[:price].to_s.downcase == "indisponível" %>
+              <span style="color: #b45309;">
+                Indisponível
+              </span>
+            <% else %>
+              <strong style="color: #047857;">
+                <%= product[:price] %>
+              </strong>
+            <% end %>
+          </td>
+
+          <td style="padding: 14px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; white-space: nowrap;">
+            <%= product[:club_price].presence || "-" %>
+          </td>
+
+          <td style="padding: 14px 12px; border-bottom: 1px solid #e5e7eb; white-space: nowrap;">
+            <%= link_to "Confira a oferta",
+                        product[:url],
+                        style: "color: #2563eb; text-decoration: none;" %>
+
+            <% if product[:error] %>
+              <div style="margin-top: 4px; color: #b91c1c; font-size: 12px; white-space: normal;">
+                <%= product[:error] %>
+              </div>
+            <% end %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% end %>
+
+<p style="margin: 24px 0 0; color: #9ca3af; font-size: 12px;">
   Relatório automático. Os preços e a disponibilidade podem mudar conforme a loja e a região.
 </p>
