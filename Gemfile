@@ -49,7 +49,7 @@ group :development, :test do
   gem 'rubocop-rails-omakase', require: false
 end
 
-gem 'rspec-rails', '~> 8.0', groups: [ :development, :test ]
+gem 'rspec-rails', '~> 8.1', groups: [ :development, :test ]
 
 gem 'webmock', '~> 3.26', group: :test
 
