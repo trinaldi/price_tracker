@@ -51,7 +51,7 @@ end
 
 gem 'rspec-rails', '~> 8.0', groups: [ :development, :test ]
 
-gem 'webmock', '~> 3.26', group: :test
+gem 'webmock', '~> 3.37', group: :test
 
 gem 'letter_opener', '~> 1.10', group: :development
 
